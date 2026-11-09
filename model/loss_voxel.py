@@ -2,10 +2,7 @@ import tensorflow as tf
 from typing import Optional
 import numpy as np
 from tensorflow.keras.utils import register_keras_serializable
-from scipy.optimize import linear_sum_assignment
-from preprocessing.load_data import label_target_dim
 
-_EPS = 1e-7
 
 @register_keras_serializable(package="PLACENet")
 class VoxelFocalLoss(tf.keras.losses.Loss):

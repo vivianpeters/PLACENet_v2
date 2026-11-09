@@ -18,7 +18,6 @@ from preprocessing.load_data import label_output_dim, label_target_dim, infer_la
 import glob
 import re
 import tensorflow as tf
-#from sklearn.metrics import r2_score, roc_curve, precision_recall_curve, roc_auc_score, precision_score, recall_score, f1_score
 from pathlib import Path
 
 
@@ -90,6 +89,12 @@ class PLACENetPlot:
             y_true = y_true[..., 0]
         if y_pred.ndim == 4 and y_pred.shape[-1] == 1:
             y_pred = y_pred[..., 0]
+            
+        # Mask out non-physical corner voxels
+        from auxiliaries.geometry import coarse_inner_drum_mask
+        mask = coarse_inner_drum_mask(self.drum, y_pred.shape)
+        y_pred = y_pred * mask
+        y_true = y_true * mask
 
         prediction_hist = (y_pred >= threshold).astype(bool)
         actual_hist = (y_true >= 0.5).astype(bool)
@@ -388,6 +393,7 @@ class PLACENetPlot:
         detector_coords_csv: Optional[Path] = None,
         show_detectors: bool = False,
         label_mode: Optional[str] = None,
+        output_path: Optional[Path] = None,
     ):
         """
         Compare predicted and actual bounding boxes using wireframe drum visualization (PLACENet_GNN style)
@@ -453,7 +459,12 @@ class PLACENetPlot:
         target_dim = 6 if actual_label_mode == "bbox" else 3
 
         if y_pred.shape[-1] == output_dim:
-            y_pred, _ = extract_boxes_from_model_output(y_pred, confidence_threshold=0.5, label_mode=actual_label_mode)
+            if actual_label_mode == "bbox":
+                from postprocessing.wbf import apply_postprocessing
+                y_pred = apply_postprocessing(y_pred, method="wbf", dist_threshold=8.0, conf_threshold=0.35, top_k=3, pad_value=0.0)
+                y_pred, _ = extract_boxes_from_model_output(y_pred, confidence_threshold=0.0, label_mode=actual_label_mode)
+            else:
+                y_pred, _ = extract_boxes_from_model_output(y_pred, confidence_threshold=0.35, label_mode=actual_label_mode)
         if y_true.shape[-1] == output_dim:
             y_true = y_true[..., :target_dim]
 
@@ -461,7 +472,7 @@ class PLACENetPlot:
         # Apply JV matching
         y_pred_matched = align_predictions_to_ground_truth(y_true, y_pred)
 
-        output_path = res_dir / f"comparison_sample{sample_idx}.pdf"
+        output_path = Path(output_path) if output_path is not None else (res_dir / f"comparison_sample{sample_idx}.pdf")
 
         if style == "wireframe":
             fig = self.plot_3d_bbox_predictions_sample(
@@ -484,8 +495,8 @@ class PLACENetPlot:
         for source_idx in range(y_pred_matched.shape[1]):
             source_bbox = y_pred_matched[0, source_idx]
 
-            # Skip padded sources (all -1)
-            if np.all(source_bbox == pad_value):
+            # Skip padded sources
+            if np.all(source_bbox == 0.0):
                 continue
 
             # Format: [xwidth, xcentre, ywidth, ycentre, zwidth, zcentre]
@@ -514,8 +525,8 @@ class PLACENetPlot:
         for source_idx in range(y_true.shape[1]):
             source_bbox = y_true[0, source_idx]
 
-            # Skip padded sources (all -1)
-            if np.all(source_bbox == pad_value):
+            # Skip padded sources
+            if np.all(source_bbox == 0.0):
                 continue
 
             # Format: [xwidth, xcentre, ywidth, ycentre, zwidth, zcentre]

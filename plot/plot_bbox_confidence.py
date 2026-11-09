@@ -7,7 +7,6 @@ def plot_confidence_by_slot_type(
         pred_confidences: np.ndarray,
         true_confidences: np.ndarray,
         output_path: Path = None,
-        title: Optional[str] = None,
     ):
         """
         Plot the distribution of predicted confidence scores separated by slot type (valid vs empty),
@@ -69,10 +68,6 @@ def plot_confidence_by_slot_type(
         
         ax.set_xlabel('Predicted confidence score', fontsize=26)
         ax.set_ylabel('Frequency', fontsize=26)
-        #if title:
-        #    ax.set_title(title, fontsize=18, fontweight='bold')
-        #else:
-        #    ax.set_title('Distribution by Slot Type', fontsize=18, fontweight='bold')
         
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=2, fontsize=26)
 
@@ -92,8 +87,6 @@ def plot_confidence_by_slot_type(
         x_max = max(1.0, pred_conf_flat.max() + 0.05)
         ax.set_xlim(x_min, x_max)
         
-        # Adjust layout to make room for legend on the right
-        #plt.subplots_adjust(right=0.75)
         
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)

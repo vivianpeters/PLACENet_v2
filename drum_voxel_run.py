@@ -19,8 +19,8 @@ import random
 # ---------------------------------------------------------
 # 1. Configuration & Drum Geometry Setup
 # ---------------------------------------------------------
-data_root = "/your/csv/data/path"
-run_name = "your-run-name"
+data_root = "/your/directory/"
+run_name = "your_run_name"
 
 # Initialize the physical drum geometry
 drum = PLACEGeometry()
@@ -35,7 +35,7 @@ prep = PLACENetPrep(
         chunk_size=56,    
         max_sources=3,    
         label_mode="voxel",
-        voxel_grid=(10, 10, 10),
+        voxel_grid=(20, 20, 30),
         coordinate_mapper=lambda x, y, z, shape: fine_voxel_to_coarse_indices(x, y, z, drum, shape),
         cluster_method="hdbscan",
         randomize_slot_assignment=True,
@@ -56,18 +56,18 @@ else:
 # 3. Model Training
 # ---------------------------------------------------------
 # Get the voxel mask from the geometry to restrict predictions to physical space
-mask = coarse_inner_drum_mask(drum, (10, 10, 10))
+mask = coarse_inner_drum_mask(drum, (20, 20, 30))
 
 trainer = PLACENet(
     PLACENetConfig(
         run_name=run_name,
         max_sources=3,
         label_mode="voxel",
-        voxel_grid=(10, 10, 10),
+        voxel_grid=(20, 20, 30),
         voxel_mask=mask,
         
         # Model Architecture & Hyperparameters
-        backbone="cnn",
+        backbone="transformer",
         learning_rate=1e-4,
         warmup_epochs=20,
         l2_reg=1e-3,
@@ -94,7 +94,11 @@ print(f"Final Metrics: {result.metrics[-1]}")
 # 4. Evaluation & Plotting
 # ---------------------------------------------------------
 print("\nRunning Evaluation...")
+
 res_dir = Path(f"Results_{run_name}")
+
+# Get the voxel mask from the geometry to restrict predictions to physical space
+mask = coarse_inner_drum_mask(drum, (20, 20, 30))
 
 # Save the loss curves
 print(f"Saving loss curves to {res_dir / 'loss_curves.pdf'}")
@@ -104,14 +108,18 @@ save_loss_curves(result.histories, res_dir / "loss_curves.pdf")
 eval_config = EvaluationConfig(
     label_mode="voxel",
     file_label=run_name,
-    voxel_threshold=0.5,
+    voxel_threshold=0.3,
+    voxel_k_threshold=0.5,              # Relative threshold (0.0 to disable, or e.g. 0.35)
+    voxel_top_k=None,                       # Top-K cluster cap (physical maximum of 3 sources)
+    voxel_min_cluster_voxels=2,          # Minimum connected voxels per cluster
+    voxel_mask=mask,                     # Apply physical bounds mask to evaluation metrics
     voxel_cluster_parity=EvalStepConfig(enabled=True, plot_results=True, print_results=True),
     loss_curves=EvalStepConfig(enabled=False),
     confusion_matrices=EvalStepConfig(enabled=True, plot_results=True, print_results=True),
     performance_by_count=EvalStepConfig(enabled=True, plot_results=True, print_results=True)
 )
 
-# Run the comprehensive evaluation suite
+# Run the evaluation
 evaluator = Evaluator(eval_config, results_dir=str(res_dir), data_dir=data_root)
 evaluator.run() 
 
@@ -122,6 +130,7 @@ try:
     from plot.plot_samples import PLACENetPlot
     plotter = PLACENetPlot()
     print("\nGenerating drum sample plot...")
-    plotter.plot_voxel_predictions(res_dir, file_label=run_name, sample_idx=0, threshold=0.5)
+    rand_idx = random.randint(0,1000)
+    plotter.plot_voxel_predictions(res_dir, file_label=run_name, sample_idx=rand_idx, threshold=0.3)
 except Exception as e:
     print(f"\nCould not generate sample plot: {e}")

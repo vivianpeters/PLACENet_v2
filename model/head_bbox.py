@@ -1,11 +1,6 @@
-
 import tensorflow as tf
 import numpy as np
 from tensorflow.keras.utils import register_keras_serializable
-from scipy.optimize import linear_sum_assignment
-from preprocessing.load_data import label_target_dim
-
-_EPS = 1e-7
 
 @register_keras_serializable(package="PLACENet")
 def _transform_box_params(box_tensor, center_min=None, center_scale=None):

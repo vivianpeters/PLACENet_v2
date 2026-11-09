@@ -1,7 +1,7 @@
 
 # PLACENet - Simplified CNN-based model with bounding box output and confidence output
 # Supports smooth_l1, ciou, and hybrid loss types
-# Supports greedy or JV (Jonker-Volgenant) matching
+# Supports only JV (Jonker-Volgenant) matching
 
 from __future__ import annotations
 import gc
@@ -41,7 +41,7 @@ from preprocessing.augmenter import PLACESpectrumAugmenter
 
 class ValidationIoUMetric(tf.keras.callbacks.Callback):
     """
-    Compute mean validation IoU after slot matching at the end of each epoch.
+    Compute mean validation IoU after JV slot matching at the end of each epoch.
     Writes ``val_iou`` into ``logs`` for EarlyStopping / history (higher is better).
     """
 
@@ -51,7 +51,6 @@ class ValidationIoUMetric(tf.keras.callbacks.Callback):
         y_val: np.ndarray,
         *,
         confidence_threshold: float = 0.5,
-        matching_strategy: str = "greedy",
         batch_size: int = 32,
         label_mode: str = "bbox",
     ):
@@ -59,33 +58,23 @@ class ValidationIoUMetric(tf.keras.callbacks.Callback):
         self.x_val = x_val
         self.y_val = np.asarray(y_val, dtype=np.float32)
         self.confidence_threshold = confidence_threshold
-        self.matching_strategy = matching_strategy.lower()
         self.batch_size = batch_size
         self.label_mode = label_mode
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        from evaluation.evaluator import (
-            apply_greedy_matching,
-            apply_jv_matching,
-            compute_iou_per_slot_stats,
-        )
+        from evaluation.evaluator import extract_boxes_from_model_output, align_predictions_to_ground_truth
+        from evaluation.eval_bbox_iou import compute_iou_per_slot_stats
 
         logs = logs or {}
         y_pred = self.model.predict(self.x_val, batch_size=self.batch_size, verbose=0)
-        if self.matching_strategy == "jv":
-            y_pred_matched = apply_jv_matching(
-                self.y_val,
-                y_pred,
-                confidence_threshold=self.confidence_threshold,
-                label_mode=self.label_mode,
-            )
-        else:
-            y_pred_matched = apply_greedy_matching(
-                self.y_val,
-                y_pred,
-                confidence_threshold=self.confidence_threshold,
-                label_mode=self.label_mode,
-            )
+        
+        # Filter predictions by confidence threshold
+        pred, pred_conf = extract_boxes_from_model_output(
+            y_pred, confidence_threshold=self.confidence_threshold, label_mode=self.label_mode
+        )
+        # JV optimal assignment
+        y_pred_matched, _ = align_predictions_to_ground_truth(self.y_val, pred, pred_conf)
+        
         mean_iou, _, count = compute_iou_per_slot_stats(
             self.y_val, y_pred_matched, label_mode=self.label_mode
         )
@@ -101,7 +90,6 @@ class ValidationPositionMetric(tf.keras.callbacks.Callback):
         y_val: np.ndarray,
         *,
         confidence_threshold: float = 0.5,
-        matching_strategy: str = "greedy",
         batch_size: int = 32,
         label_mode: str = "bbox",
     ):
@@ -109,33 +97,23 @@ class ValidationPositionMetric(tf.keras.callbacks.Callback):
         self.x_val = x_val
         self.y_val = np.asarray(y_val, dtype=np.float32)
         self.confidence_threshold = confidence_threshold
-        self.matching_strategy = matching_strategy.lower()
         self.batch_size = batch_size
         self.label_mode = label_mode
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        from evaluation.evaluator import (
-            apply_greedy_matching,
-            apply_jv_matching,
-            compute_position_mae_per_slot_stats,
-        )
+        from evaluation.evaluator import extract_boxes_from_model_output, align_predictions_to_ground_truth
+        from evaluation.eval_metrics import compute_position_mae_per_slot_stats
 
         logs = logs or {}
         y_pred = self.model.predict(self.x_val, batch_size=self.batch_size, verbose=0)
-        if self.matching_strategy == "jv":
-            y_pred_matched = apply_jv_matching(
-                self.y_val,
-                y_pred,
-                confidence_threshold=self.confidence_threshold,
-                label_mode=self.label_mode,
-            )
-        else:
-            y_pred_matched = apply_greedy_matching(
-                self.y_val,
-                y_pred,
-                confidence_threshold=self.confidence_threshold,
-                label_mode=self.label_mode,
-            )
+        
+        # Filter predictions by confidence threshold
+        pred, pred_conf = extract_boxes_from_model_output(
+            y_pred, confidence_threshold=self.confidence_threshold, label_mode=self.label_mode
+        )
+        # JV optimal assignment
+        y_pred_matched, _ = align_predictions_to_ground_truth(self.y_val, pred, pred_conf)
+        
         mean_mae, _, count = compute_position_mae_per_slot_stats(
             self.y_val, y_pred_matched, label_mode=self.label_mode
         )
@@ -339,9 +317,7 @@ class PLACENetCore:
             init_log_var_box=getattr(config, "init_log_var_box", 0.0),
             init_log_var_conf=getattr(config, "init_log_var_conf", 0.0),
         )
-        ## Update: homoscedastic uncertainty weighting
-        model._trainable_variables.extend([loss_fn.s_box, loss_fn.s_conf])
-        
+
         print(
             f"[make_CNN_model] backbone={backbone}, label_mode={config.label_mode}, "
             f"matching={config.matching_strategy}, base={config.loss_type}, "
@@ -587,7 +563,12 @@ class PLACENetCore:
         with open(results_dir / f"run_config_{file_label}.json", "w") as f:
             json.dump(run_config, f, indent=2)
 
-        for kfold, (train, test) in enumerate(KFold(n_splits=config.folds, shuffle=True, random_state=42).split(data, labels)):
+        if config.folds == 1:
+            splits = list(KFold(n_splits=5, shuffle=True, random_state=42).split(data, labels))[:1]
+        else:
+            splits = list(KFold(n_splits=config.folds, shuffle=True, random_state=42).split(data, labels))
+
+        for kfold, (train, test) in enumerate(splits):
             tf.keras.backend.clear_session()
             gc.collect()
             try:
@@ -642,8 +623,13 @@ class PLACENetCore:
             np.savetxt(results_dir / f"data_test_{file_label}_kf{kfold}.csv", data_test_2d, delimiter=" ", fmt="%.8g")
             np.savetxt(results_dir / f"labels_test_{file_label}_kf{kfold}.csv", labels_test_2d, delimiter=" ", fmt="%.8g")
 
-            log_dir = results_dir / "logs" / f"{file_label}_kf{kfold}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=str(log_dir), histogram_freq=0)
+            extra_callbacks = []
+            try:
+                log_dir = results_dir / "logs" / f"{file_label}_kf{kfold}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                extra_callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=str(log_dir), histogram_freq=0))
+            except Exception as e:
+                print(f"[Warning] Could not initialize TensorBoard callback: {e}")
+
             training_callbacks = self.build_training_callbacks(
                 config,
                 data[test],
@@ -655,7 +641,7 @@ class PLACENetCore:
                 train_data_fold, train_labels_prep,
                 epochs=config.epochs,
                 batch_size=config.batch_size,
-                callbacks=[*training_callbacks, tensorboard_callback],
+                callbacks=[*training_callbacks, *extra_callbacks],
                 validation_data=(data[test], test_labels_prep),
                 verbose=0
             )

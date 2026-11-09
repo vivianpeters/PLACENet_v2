@@ -94,7 +94,7 @@ class PLACEGeometry:
 
 
 def make_drum_cylinder_surfaces(
-    drum: PLACEDrumGeometry,
+    drum: PLACEGeometry,
     *,
     centre_x: float | None = None,
     centre_y: float | None = None,
@@ -125,7 +125,7 @@ def make_drum_cylinder_surfaces(
     return (xc_i, yc_i, zc_i), (xc_o, yc_o, zc_o)
 
 
-def add_drum_surfaces_to_axes(ax, drum: PLACEDrumGeometry, *, alpha: float = 0.2) -> None:
+def add_drum_surfaces_to_axes(ax, drum: PLACEGeometry, *, alpha: float = 0.2) -> None:
     """Overlay inner (lighter) and outer drum cylinders on a 3D axis."""
     inner, outer = make_drum_cylinder_surfaces(drum)
     ax.plot_surface(*inner, color="gold", alpha=alpha, linewidth=0, antialiased=True)
@@ -136,7 +136,7 @@ def fine_voxel_to_coarse_indices(
     x: float,
     y: float,
     z: float,
-    drum: PLACEDrumGeometry,
+    drum: PLACEGeometry,
     grid_shape: Tuple[int, int, int],
 ) -> Optional[Tuple[int, int, int]]:
     """Map fine 10 mm label indices to a coarse cell, or None if outside inner drum."""
@@ -158,7 +158,7 @@ def fine_voxel_to_coarse_indices(
 
 
 def coarse_inner_drum_mask(
-    drum: PLACEDrumGeometry,
+    drum: PLACEGeometry,
     grid_shape: Tuple[int, int, int],
 ) -> np.ndarray:
     """Boolean mask (nx, ny, nz): coarse cells whose centres lie inside inner cylinder."""

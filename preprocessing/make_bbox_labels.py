@@ -1,6 +1,6 @@
 import numpy as np
 import warnings
-from typing import List, Tuple, Literal, Sequence
+from typing import List, Tuple, Literal, Sequence, Optional
 
 try:
     from sklearn.cluster import DBSCAN, HDBSCAN
@@ -9,16 +9,60 @@ except ImportError:
 
 ClusterMethod = Literal["dbscan", "hdbscan"]
 
+def voxels_to_centre(src_voxels: np.ndarray, centroid_method: str = "mean") -> Tuple[float, float, float]:
+    if centroid_method == "bbox":
+        xmin, xmax = np.min(src_voxels[:, 0]), np.max(src_voxels[:, 0])
+        ymin, ymax = np.min(src_voxels[:, 1]), np.max(src_voxels[:, 1])
+        zmin, zmax = np.min(src_voxels[:, 2]), np.max(src_voxels[:, 2])
+        return (xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0
+
+    coords = src_voxels[:, :3]
+    if src_voxels.shape[1] >= 4:
+        weights = src_voxels[:, 3]
+        if np.any(weights > 0):
+            xcentre, ycentre, zcentre = np.average(coords, axis=0, weights=weights)
+            return float(xcentre), float(ycentre), float(zcentre)
+    xcentre, ycentre, zcentre = np.mean(coords, axis=0)
+    return float(xcentre), float(ycentre), float(zcentre)
+
+def merge_adjacent_clusters(clusters: List[np.ndarray], dist_threshold: float = 6.0) -> List[np.ndarray]:
+    """
+    Merge clusters whose centroids are within `dist_threshold` (in voxels).
+    Repeats until all cluster centroids are separated by > dist_threshold.
+    """
+    if len(clusters) <= 1 or dist_threshold <= 0.0:
+        return clusters
+    merged = list(clusters)
+    changed = True
+    while changed:
+        changed = False
+        centers = [voxels_to_centre(c, "mean") for c in merged]
+        n = len(merged)
+        for i in range(n):
+            for j in range(i + 1, n):
+                d = np.linalg.norm(np.array(centers[i]) - np.array(centers[j]))
+                if d <= dist_threshold:
+                    merged[i] = np.vstack([merged[i], merged[j]])
+                    merged.pop(j)
+                    changed = True
+                    break
+            if changed:
+                break
+    return merged
+
 def cluster_voxels_into_sources(
     pos: np.ndarray,
     method: ClusterMethod = "hdbscan",
     eps: float = 3.0,
     min_samples: int = 1,
     min_cluster_size: int = 1,
+    merge_dist_threshold: float = 6.0,
+    max_physical_sources: Optional[int] = 3,
 ) -> List[np.ndarray]:
     """
     Cluster active voxels into separate sources.
-    Uses HDBSCAN or DBSCAN based on the `method` argument.
+    Uses HDBSCAN or DBSCAN, then merges adjacent fragmented sub-clusters and
+    enforces physical source count constraints.
     """
     if len(pos) == 0:
         return []
@@ -29,6 +73,8 @@ def cluster_voxels_into_sources(
             min_cluster_size=max(2, min_cluster_size),
             min_samples=min_samples,
             cluster_selection_epsilon=eps,
+            cluster_selection_method="eom",
+            allow_single_cluster=True,
         )
         labels = clusterer.fit_predict(coords)
     elif method == "dbscan":
@@ -48,23 +94,27 @@ def cluster_voxels_into_sources(
     if -1 in unique_labels and not sources:
         sources.append(pos[labels == -1])
         
+    # 1. Merge adjacent clusters whose centroids are within merge_dist_threshold
+    if merge_dist_threshold > 0.0 and len(sources) > 1:
+        sources = merge_adjacent_clusters(sources, merge_dist_threshold)
+
+    # 2. Sort clusters descending by emission weight (column 3) or voxel count
+    sources.sort(key=lambda c: np.sum(c[:, 3]) if c.shape[1] >= 4 else len(c), reverse=True)
+
+    # 3. If cluster count still exceeds physical maximum, merge excess small clusters into nearest source
+    if max_physical_sources is not None and len(sources) > max_physical_sources:
+        primary = sources[:max_physical_sources]
+        excess = sources[max_physical_sources:]
+        primary_centers = [voxels_to_centre(c, "mean") for c in primary]
+        for exc in excess:
+            exc_center = voxels_to_centre(exc, "mean")
+            dists = [np.linalg.norm(np.array(pc) - np.array(exc_center)) for pc in primary_centers]
+            nearest_idx = int(np.argmin(dists))
+            primary[nearest_idx] = np.vstack([primary[nearest_idx], exc])
+            primary_centers[nearest_idx] = voxels_to_centre(primary[nearest_idx], "mean")
+        sources = primary
+
     return sources
-
-def voxels_to_centre(src_voxels: np.ndarray, centroid_method: str) -> Tuple[float, float, float]:
-    if centroid_method == "bbox":
-        xmin, xmax = np.min(src_voxels[:, 0]), np.max(src_voxels[:, 0])
-        ymin, ymax = np.min(src_voxels[:, 1]), np.max(src_voxels[:, 1])
-        zmin, zmax = np.min(src_voxels[:, 2]), np.max(src_voxels[:, 2])
-        return (xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0
-
-    coords = src_voxels[:, :3]
-    if src_voxels.shape[1] >= 4:
-        weights = src_voxels[:, 3]
-        if np.any(weights > 0):
-            xcentre, ycentre, zcentre = np.average(coords, axis=0, weights=weights)
-            return float(xcentre), float(ycentre), float(zcentre)
-    xcentre, ycentre, zcentre = np.mean(coords, axis=0)
-    return float(xcentre), float(ycentre), float(zcentre)
 
 def voxels_to_bbox_label(src_voxels: np.ndarray, centroid_method: str) -> List[float]:
     xmin, xmax = np.min(src_voxels[:, 0]), np.max(src_voxels[:, 0])
@@ -117,6 +167,8 @@ def make_simple_labels(
     cluster_method: ClusterMethod = "hdbscan",
     cluster_min_samples: int = 1,
     cluster_min_cluster_size: int = 1,
+    cluster_merge_dist: float = 6.0,
+    max_physical_sources: Optional[int] = 3,
     randomize_slots: bool = False,
     label_dtype: np.dtype = np.float32,
     label_mode: Literal["bbox", "position"] = "bbox",
@@ -141,6 +193,8 @@ def make_simple_labels(
                     eps=eps,
                     min_samples=cluster_min_samples,
                     min_cluster_size=cluster_min_cluster_size,
+                    merge_dist_threshold=cluster_merge_dist,
+                    max_physical_sources=max_physical_sources,
                 )
                 source_labels = [_label_from_voxels(src_voxels) for src_voxels in sources[:max_sources]]
                 dataset_labels.append(

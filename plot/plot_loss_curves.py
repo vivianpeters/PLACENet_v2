@@ -55,10 +55,9 @@ def plot_loss_curves_from_tb(logs_dir: Path, output_path: Path):
     # Find all fold directories in logs_dir
     fold_dirs = sorted([d for d in logs_dir.iterdir() if d.is_dir()])
     
-    # We may have multiple timestamps for the same fold, so group by fold index
-    # Folder names look like: pu-240_drum_voxel20x20x20_cnn_kf0_20260820-175610
+    # May have multiple timestamps for the same fold, so group by fold index
     
-    # Let's just group by fold name (e.g. kf0, kf1)
+    # Group by fold name
     folds_data = {}
     
     import tensorflow as tf

@@ -15,7 +15,7 @@ class PLACENetConfig:
     folds: int = 5 # Number of folds for cross-validation
     max_sources: int = 1 # Maximum number of sources to classify
     run_name: str = "PLACENet_run" # Name of the run for loggingss
-    matching_strategy: str = "jv" # "greedy" or "jv"
+    matching_strategy: str = "jv" # only "jv" for now
     delta: float = 1.0  # For smooth_l1
     ciou_weight: float = 1.0 # Weight for the CIoU loss
     smooth_weight: float = 1.0 # Weight for the smooth L1 loss

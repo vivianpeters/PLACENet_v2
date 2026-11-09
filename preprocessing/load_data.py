@@ -10,7 +10,7 @@ from .make_voxel_labels import make_voxel_occupancy_labels
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 from sklearn.cluster import DBSCAN, HDBSCAN
@@ -67,8 +67,10 @@ class PLACEPrepConfig:
     max_sources: int = 1  # Maximum number of sources to classify
     cluster_method: ClusterMethod = "hdbscan"  # "hdbscan" or "dbscan"
     cluster_eps: float = 2.0  # DBSCAN eps; HDBSCAN cluster_selection_epsilon (voxel distance)
-    cluster_min_samples: int = 1  # DBSCAN min_samples; HDBSCAN min_samples
-    cluster_min_cluster_size: int = 2
+    cluster_min_samples: int = 3  # DBSCAN min_samples; HDBSCAN min_samples
+    cluster_min_cluster_size: int = 5
+    cluster_merge_dist: float = 6.0  # Merge cluster centroids closer than this distance (voxels)
+    max_physical_sources: Optional[int] = 3  # Cap maximum clusters (e.g. 3 for physical drum sources)
     randomize_slot_assignment: bool = False  # If True, randomly assign sources to slots instead of sequential
     label_dtype: str = "float32"  # Box label dtype (use float32; int32 truncates centres/widths)
     # "bbox": [xwidth, xcentre, ywidth, ycentre, zwidth, zcentre] per source (6 dims)
@@ -388,6 +390,8 @@ class PLACENetPrep:
             cluster_method=self.config.cluster_method,
             cluster_min_samples=self.config.cluster_min_samples,
             cluster_min_cluster_size=self.config.cluster_min_cluster_size,
+            cluster_merge_dist=self.config.cluster_merge_dist,
+            max_physical_sources=self.config.max_physical_sources,
             randomize_slots=self.config.randomize_slot_assignment,
             label_dtype=self._label_dtype,
             label_mode=self.config.label_mode,

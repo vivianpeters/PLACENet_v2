@@ -293,25 +293,45 @@ class Evaluator:
         pred_raw = model.predict(data_test, verbose=0)
         
         if actual_label_mode == "voxel":
+            if self.config.voxel_mask is not None:
+                mask = np.expand_dims(self.config.voxel_mask, axis=(0, -1))
+                labels_test = labels_test * mask
+                pred_raw = pred_raw * mask
+                
             return {
                 "labels": labels_test,
                 "pred": pred_raw,
                 "actual_label_mode": actual_label_mode
             }
             
+        pred_raw_original = pred_raw.copy()
+        
+        if actual_label_mode == "bbox":
+            from postprocessing.wbf import apply_postprocessing
+            pred_raw = apply_postprocessing(
+                pred_raw,
+                method=self.config.postprocessing_method,
+                dist_threshold=self.config.wbf_dist_threshold,
+                conf_threshold=self.config.conf_threshold,
+                k_threshold=self.config.k_threshold,
+                top_k=self.config.top_k,
+                iou_threshold=self.config.iou_threshold,
+                pad_value=0.0
+            )
+            
         pred, pred_confidences = extract_boxes_from_model_output(
-            pred_raw, confidence_threshold=0.5, label_mode=actual_label_mode
+            pred_raw, confidence_threshold=self.config.conf_threshold, label_mode=actual_label_mode
         )
         
         pred_matched, pred_conf_matched = align_predictions_to_ground_truth(
             labels_test, pred, pred_confidences, cost_metric=self.config.match_mode
         )
         
-        pred_unfiltered, _ = extract_boxes_from_model_output(
-            pred_raw, confidence_threshold=0.0, label_mode=actual_label_mode
+        pred_unfiltered, pred_confidences_raw = extract_boxes_from_model_output(
+            pred_raw_original, confidence_threshold=0.0, label_mode=actual_label_mode
         )
         _, pred_conf_matched_raw = align_predictions_to_ground_truth(
-            labels_test, pred_unfiltered, pred_confidences, cost_metric=self.config.match_mode
+            labels_test, pred_unfiltered, pred_confidences_raw, cost_metric=self.config.match_mode
         )
         
         return {
@@ -338,14 +358,25 @@ class Evaluator:
         
         if step_config.print_results:
             r2_res = compute_r2_scores(labels, pred_matched, max_sources, target_dim, data["actual_label_mode"])
-            mae_res = compute_mae_metrics(labels, pred_matched, max_sources, target_dim)
+            mae_res = compute_mae_metrics(labels, pred_matched, max_sources, target_dim, data["actual_label_mode"])
             
             output_lines = [
                 f"\n--- Metrics ({suffix}) ---",
                 f"R2 Valid Slots: {r2_res['r2_valid']:.4f}",
-                f"R2 All Slots:   {r2_res['r2_all']:.4f}",
-                f"MAE:            {mae_res['mae']:.4f} cm"
             ]
+            if "r2_positions" in r2_res and not np.isnan(r2_res["r2_positions"]):
+                output_lines.append(f"R2 Positions:   {r2_res['r2_positions']:.4f}")
+            if "r2_widths" in r2_res and not np.isnan(r2_res["r2_widths"]):
+                output_lines.append(f"R2 Widths:      {r2_res['r2_widths']:.4f}")
+            output_lines.append(f"R2 All Slots:   {r2_res['r2_all']:.4f}")
+            
+            if not np.isnan(mae_res['mean_3d_dist']):
+                output_lines.append(f"Mean 3D Distance Error: {mae_res['mean_3d_dist']:.4f} mm")
+            
+            output_lines.append(f"Avg 1D MAE Positions: {mae_res['mae_pos']:.4f} cm")
+            if not np.isnan(mae_res['mae_widths']):
+                output_lines.append(f"Avg 1D MAE Widths:    {mae_res['mae_widths']:.4f} cm")
+                
             for line in output_lines: print(line)
             
             with open(self.res_dir / f"evaluation_metrics_{self.config.file_label}.txt", "a") as f:
@@ -400,8 +431,8 @@ class Evaluator:
             pred = data["pred"]
             batch_size = labels.shape[0]
             
-            true_counts = np.array([count_voxel_clusters(labels[b], self.config.voxel_threshold) for b in range(batch_size)])
-            pred_counts = np.array([count_voxel_clusters(pred[b], self.config.voxel_threshold) for b in range(batch_size)])
+            true_counts = np.array([count_voxel_clusters(labels[b], threshold=0.5, k_threshold=self.config.voxel_k_threshold, top_k=self.config.voxel_top_k, min_voxels=self.config.voxel_min_cluster_voxels) for b in range(batch_size)])
+            pred_counts = np.array([count_voxel_clusters(pred[b], threshold=self.config.voxel_threshold, k_threshold=self.config.voxel_k_threshold, top_k=self.config.voxel_top_k, min_voxels=self.config.voxel_min_cluster_voxels) for b in range(batch_size)])
             
             # For plotting confusion matrix, determine max sources dynamically based on data
             max_sources_dyn = max(np.max(true_counts), np.max(pred_counts))
@@ -411,11 +442,11 @@ class Evaluator:
             pred_matched = data["pred_matched"]
             pred_conf = data["pred_conf_matched"]
             
-            max_sources = labels.shape[1]
-            all_labels = np.arange(0, max_sources + 1)
-            
             true_counts = count_valid_sources(labels)
-            pred_counts = count_valid_sources(pred_matched, pred_conf)
+            pred_counts = count_valid_sources(pred_matched, pred_conf, threshold=self.config.conf_threshold)
+            
+            max_sources_dyn = max(np.max(true_counts), np.max(pred_counts))
+            all_labels = np.arange(0, max_sources_dyn + 1)
             
         res = compute_classification_metrics(true_counts, pred_counts, all_labels, "jv")
             
@@ -432,7 +463,7 @@ class Evaluator:
             
             if step_config.plot_results:
                 iou_vals = compute_voxel_iou(labels, pred, self.config.voxel_threshold)
-                true_counts = np.array([count_voxel_clusters(labels[b], self.config.voxel_threshold) for b in range(batch_size)])
+                true_counts = np.array([count_voxel_clusters(labels[b], threshold=0.5, k_threshold=self.config.voxel_k_threshold, top_k=self.config.voxel_top_k, min_voxels=self.config.voxel_min_cluster_voxels) for b in range(batch_size)])
                 
                 iou_res = [{"num_sources": count, "iou": float(iou)} for count, iou in zip(true_counts, iou_vals)]
                 if len(iou_res) > 0:
@@ -455,16 +486,17 @@ class Evaluator:
             labels = data["labels"]
             pred_matched = data["pred_matched"]
             
-            if step_config.plot_results:
-                iou_res = get_iou_by_source_count(labels, pred_matched, data["actual_label_mode"])
-                if len(iou_res) > 0:
-                    df = pd.DataFrame(iou_res)
-                    out_path = self.res_dir / f"iou_by_count_{self.config.file_label}_{suffix}.pdf"
-                    try:
+            if data["actual_label_mode"] == "bbox":
+                if step_config.plot_results:
+                    from evaluation.eval_volume_iou import compute_total_volume_iou
+                    t_vol_ious = compute_total_volume_iou(labels, pred_matched)
+                    true_counts = [np.sum(~np.all(np.isclose(labels[b], 0.0, atol=1e-3), axis=-1)) for b in range(labels.shape[0])]
+                    iou_res = [{"num_sources": c, "iou": float(i)} for c, i in zip(true_counts, t_vol_ious) if c > 0]
+                    if len(iou_res) > 0:
+                        df = pd.DataFrame(iou_res)
+                        out_path = self.res_dir / f"iou_by_count_{self.config.file_label}_{suffix}.pdf"
                         from plot.plot_performance_by_count import plot_iou_vs_source_count
                         plot_iou_vs_source_count(df, output_path=out_path)
-                    except ImportError:
-                        if self.config.verbose: print("Could not import PLACENetPlot for performance by count plot.")
 
     def _run_step_voxel_cluster_parity(self, data, step_config: EvalStepConfig, suffix: str):
         if data["actual_label_mode"] != "voxel":
@@ -478,27 +510,29 @@ class Evaluator:
         all_matched_pred = []
         
         for b in range(batch_size):
-            t_cents = extract_cluster_centroids(labels[b], threshold=0.5)
-            p_cents = extract_cluster_centroids(pred[b], threshold=self.config.voxel_threshold)
+            t_cents = extract_cluster_centroids(labels[b], threshold=0.5, k_threshold=self.config.voxel_k_threshold, top_k=self.config.voxel_top_k, min_voxels=self.config.voxel_min_cluster_voxels)
+            p_cents = extract_cluster_centroids(pred[b], threshold=self.config.voxel_threshold, k_threshold=self.config.voxel_k_threshold, top_k=self.config.voxel_top_k, min_voxels=self.config.voxel_min_cluster_voxels)
             
             matched_pairs, _, _ = match_voxel_clusters(t_cents, p_cents)
             for p_idx, t_idx in matched_pairs:
                 all_matched_true.append(t_cents[t_idx])
                 all_matched_pred.append(p_cents[p_idx])
                 
-        metrics = compute_voxel_center_metrics(all_matched_true, all_matched_pred, voxel_size_mm=self.config.voxel_size_mm)
+        metrics = compute_voxel_center_metrics(all_matched_true, all_matched_pred)
         
         if metrics is None:
             if self.config.verbose: print(f"No matched voxel clusters found for parity in {suffix}.")
             return
             
         if step_config.print_results:
+            avg_mae_mm = (metrics['mae_x_mm'] + metrics['mae_y_mm'] + metrics['mae_z_mm']) / 3.0
             log_text = (
                 f"\n--- Voxel Center Distance Parity Metrics ({suffix}) ---\n"
                 f"Mean 3D Distance Error: {metrics['mean_distance_mm']:.4f} mm\n"
-                f"MAE X: {metrics['mae_x_mm']:.4f} mm\n"
-                f"MAE Y: {metrics['mae_y_mm']:.4f} mm\n"
-                f"MAE Z: {metrics['mae_z_mm']:.4f} mm\n"
+                f"Avg 1D MAE: {avg_mae_mm:.4f} mm\n"
+                f"  -> MAE X: {metrics['mae_x_mm']:.4f} mm\n"
+                f"  -> MAE Y: {metrics['mae_y_mm']:.4f} mm\n"
+                f"  -> MAE Z: {metrics['mae_z_mm']:.4f} mm\n"
                 f"Positional R2: {metrics['r2_pos']:.4f}\n"
             )
             print(log_text)

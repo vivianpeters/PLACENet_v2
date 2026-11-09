@@ -279,7 +279,7 @@ class BBoxMatchingLoss(tf.keras.losses.Loss):
             )
             base = "smooth_l1"
         assert base in ("smooth_l1", "ciou", "hybrid")
-        assert matching_strategy in ("greedy", "jv")
+        assert matching_strategy == "jv" # only jv for now
         self.base = base
         self.max_sources = int(max_sources)
         self.matching_strategy = matching_strategy
@@ -291,11 +291,6 @@ class BBoxMatchingLoss(tf.keras.losses.Loss):
         self.label_mode = label_mode
         self.target_dim = label_target_dim(label_mode)
         self.position_axis_weights = tuple(float(w) for w in position_axis_weights)
-        ## Update: use homoscedastic uncertainty weighting (Kendall et al., CVPR 2018)
-        self.s_box = tf.Variable(self.init_log_var_box, trainable=True, dtype=tf.float32, name="s_box")
-        self.s_conf = tf.Variable(self.init_log_var_conf, trainable=True, dtype=tf.float32, name="s_conf")
-        self.s_box.regularizer = None
-        self.s_conf.regularizer = None
         matching_type = "JV (Jonker-Volgenant)"
         axis_msg = ""
         if label_mode == "position" and self.position_axis_weights != (1.0, 1.0, 1.0):
@@ -318,8 +313,6 @@ class BBoxMatchingLoss(tf.keras.losses.Loss):
             "noobj_weight": self.noobj_weight,
             "label_mode": self.label_mode,
             "position_axis_weights": self.position_axis_weights,
-            "init_log_var_box": float(self.s_box.numpy()),
-            "init_log_var_conf": float(self.s_conf.numpy()),
         })
         return cfg
 
@@ -554,18 +547,8 @@ class BBoxMatchingLoss(tf.keras.losses.Loss):
         matched_conf = self._match_conf_tf(conf_true, match_indices, match_counts)
         confidence_loss = self._confidence_loss(matched_conf, conf_pred)
 
-        # Combine losses using homoscedastic uncertainty
+        # Combine losses
         box_loss_mean = tf.reduce_mean(box_loss_per_sample)
-        s_box = self.s_box
-        s_conf = self.s_conf
-        
-        # Using Kendall et al., CVPR 2018 formulation
-        # Regression: 0.5 * exp(-s) * L + 0.5 * s
-        # Classification: exp(-s) * L + 0.5 * s
-        #total_loss = (
-        #    0.5 * tf.exp(-s_box) * box_loss_mean + 0.5 * s_box +
-        #    tf.exp(-s_conf) * confidence_loss + 0.5 * s_conf
-        #)
 
         total_loss = box_loss_mean + self.confidence_weight * confidence_loss
         

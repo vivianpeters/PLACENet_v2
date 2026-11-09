@@ -3,16 +3,10 @@ import scipy.ndimage as ndimage
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import r2_score
 
-def extract_cluster_centroids(voxel_grid: np.ndarray, threshold: float = 0.5):
-    """
-    Extract centers of mass for connected components in a 3D voxel grid.
-    
-    Returns:
-        list of np.ndarray (cx, cy, cz) centroid coordinates in voxel units.
-    """
+def _filter_clusters(voxel_grid: np.ndarray, threshold: float = 0.5, 
+                     k_threshold: float = 0.0, top_k: int = None, min_voxels: int = 1):
     binary_grid = (voxel_grid >= threshold).astype(np.uint8)
     
-    # Strip trailing dimension if it is shape (20, 20, 20, 1)
     if binary_grid.ndim == 4 and binary_grid.shape[-1] == 1:
         binary_grid = binary_grid[..., 0]
     
@@ -24,21 +18,62 @@ def extract_cluster_centroids(voxel_grid: np.ndarray, threshold: float = 0.5):
     labeled_grid, num_features = ndimage.label(binary_grid, structure=s)
     
     if num_features == 0:
-        return []
+        return 0, []
         
-    centroids = ndimage.center_of_mass(val_grid, labeled_grid, range(1, num_features + 1))
-    return [np.array(c) for c in centroids]
+    cluster_ids = np.arange(1, num_features + 1)
+    
+    # Filter by min_voxels
+    sizes = ndimage.sum(binary_grid, labeled_grid, cluster_ids)
+    # ndimage.sum returns a scalar if cluster_ids is scalar, so wrap in array if needed
+    if np.isscalar(sizes):
+        sizes = np.array([sizes])
+    valid_mask = sizes >= min_voxels
+    valid_cluster_ids = cluster_ids[valid_mask]
+    
+    if len(valid_cluster_ids) == 0:
+        return 0, []
+        
+    # Filter by k_threshold
+    if k_threshold > 0.0:
+        intensities = ndimage.maximum(val_grid, labeled_grid, valid_cluster_ids)
+        if np.isscalar(intensities):
+            intensities = np.array([intensities])
+        max_intensity = np.max(val_grid)
+        k_mask = intensities >= (max_intensity * k_threshold)
+        valid_cluster_ids = valid_cluster_ids[k_mask]
+        
+    if len(valid_cluster_ids) == 0:
+        return 0, []
+        
+    # Filter by top_k
+    if top_k is not None and len(valid_cluster_ids) > top_k:
+        intensities = ndimage.maximum(val_grid, labeled_grid, valid_cluster_ids)
+        if np.isscalar(intensities):
+            intensities = np.array([intensities])
+        sort_idx = np.argsort(intensities)[::-1]
+        valid_cluster_ids = valid_cluster_ids[sort_idx[:top_k]]
+        
+    centroids = ndimage.center_of_mass(val_grid, labeled_grid, valid_cluster_ids)
+    
+    return len(valid_cluster_ids), [np.array(c) for c in centroids]
 
-def count_voxel_clusters(voxel_grid: np.ndarray, threshold: float = 0.5):
+def extract_cluster_centroids(voxel_grid: np.ndarray, threshold: float = 0.5,
+                              k_threshold: float = 0.0, top_k: int = None, min_voxels: int = 1):
+    """
+    Extract centers of mass for connected components in a 3D voxel grid.
+    
+    Returns:
+        list of np.ndarray (cx, cy, cz) centroid coordinates in voxel units.
+    """
+    _, centroids = _filter_clusters(voxel_grid, threshold, k_threshold, top_k, min_voxels)
+    return centroids
+
+def count_voxel_clusters(voxel_grid: np.ndarray, threshold: float = 0.5,
+                         k_threshold: float = 0.0, top_k: int = None, min_voxels: int = 1):
     """
     Count the number of disconnected clusters in a voxel grid.
     """
-    binary_grid = (voxel_grid >= threshold).astype(np.uint8)
-    if binary_grid.ndim == 4 and binary_grid.shape[-1] == 1:
-        binary_grid = binary_grid[..., 0]
-        
-    s = ndimage.generate_binary_structure(3, 3)
-    _, num_features = ndimage.label(binary_grid, structure=s)
+    num_features, _ = _filter_clusters(voxel_grid, threshold, k_threshold, top_k, min_voxels)
     return num_features
 
 def compute_voxel_iou(y_true: np.ndarray, y_pred: np.ndarray, threshold: float = 0.5):
@@ -86,17 +121,34 @@ def match_voxel_clusters(true_centroids: list, pred_centroids: list):
     
     return matched_pairs, unmatched_pred, unmatched_true
 
-def compute_voxel_center_metrics(true_centroids_matched, pred_centroids_matched, voxel_size_mm=(22.9, 22.9, 31.95)):
+def compute_voxel_center_metrics(true_centroids_matched, pred_centroids_matched, grid_shape=(20, 20, 30)):
     """
     Compute Center Distance MAE and Positional R2 for matched clusters.
     """
     if len(true_centroids_matched) == 0:
         return None
         
-    scale_mm = np.array(voxel_size_mm)
+    def to_physical_cm(centroids):
+        nx, ny, nz = grid_shape
+        r_cm = 22.9
+        z_min_cm = 11.2
+        z_max_cm = 75.1
+        
+        cents_cm = []
+        for cx, cy, cz in centroids:
+            # Map to Geant4 voxel space (which is effectively cm with origin at -500mm)
+            # drum center is at 50 cm. bounds are 50 - 22.9 = 27.1 cm.
+            x_cm = 27.1 + (cx + 0.5) * (2 * r_cm) / nx
+            y_cm = 27.1 + (cy + 0.5) * (2 * r_cm) / ny
+            z_cm = z_min_cm + (cz + 0.5) * (z_max_cm - z_min_cm) / nz
+            cents_cm.append([x_cm, y_cm, z_cm])
+        return np.array(cents_cm)
+        
+    yt_cm = to_physical_cm(true_centroids_matched)
+    yp_cm = to_physical_cm(pred_centroids_matched)
     
-    yt_mm = np.array(true_centroids_matched) * scale_mm
-    yp_mm = np.array(pred_centroids_matched) * scale_mm
+    yt_mm = yt_cm * 10.0
+    yp_mm = yp_cm * 10.0
     
     # 3D Euclidean distance in mm
     distances = np.linalg.norm(yt_mm - yp_mm, axis=1)
@@ -108,11 +160,7 @@ def compute_voxel_center_metrics(true_centroids_matched, pred_centroids_matched,
     mae_z = np.mean(np.abs(yt_mm[:, 2] - yp_mm[:, 2]))
     
     # Positional R2 (scale independent)
-    r2_pos = r2_score(yt_mm, yp_mm)
-    
-    # Return coordinates in cm for parity plotting which expects cm
-    yt_cm = yt_mm / 10.0
-    yp_cm = yp_mm / 10.0
+    r2_pos = r2_score(yt_mm, yp_mm, multioutput='variance_weighted')
     
     return {
         "mean_distance_mm": mean_distance,

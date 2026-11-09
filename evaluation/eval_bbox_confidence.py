@@ -1,10 +1,10 @@
 import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, accuracy_score, roc_auc_score
 
-def count_valid_sources(boxes, confidences=None):
+def count_valid_sources(boxes, confidences=None, threshold=0.5):
     """Count number of valid sources in each sample."""
     if confidences is not None:
-        return np.sum(confidences >= 0.5, axis=-1)
+        return np.sum(confidences >= threshold, axis=-1)
     batch_size = boxes.shape[0]
     counts = []
     for b in range(batch_size):
